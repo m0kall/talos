@@ -1,0 +1,1 @@
+This file contains path of images that the users wants scanned
