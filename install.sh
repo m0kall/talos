@@ -21,6 +21,14 @@ for pkg in qemu-utils parted; do
         sudo apt-get install -y "$pkg"
     fi
 done
+#pip3 installation (fresh systems need it)
+if command -v pip3 &> /dev/null; then
+    echo "[+] Skipping pip3 installation (already installed)"
+else
+    echo "[+] Installing pip3..."
+    sudo apt-get install -y python3-pip
+fi
+
 
 #pip packages installation: tabulate,openpyxl,boto3
 for pkg in tabulate openpyxl boto3; do
