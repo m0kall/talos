@@ -36,8 +36,7 @@ for pkg in tabulate openpyxl boto3; do
         echo "[!] Skipping Package $pkg (already installed)"
     else
         echo "[+] Installing package $pkg..."
-        sudo pip3 install "$pkg" --break-system-packages #--break etc is needed if ubuntu blocks global installs
-    fi
+        sudo pip3 install "$pkg" --break-system-packages 2>/dev/null || sudo pip3 install "$pkg" #--break etc is needed if ubuntu blocks global installs
 done
 
 #installation of scanners (syft,trivy,grype,osv-scanner)
