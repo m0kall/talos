@@ -481,6 +481,35 @@ def save_merged(scan_path,image_name,out_path):
 
     return str(out_file)
 
+#this is used on aws enviroment,2do --online argument
+def generate_sbom_from_mounted_path(mount_path,image_name,output):
+
+    print(f"[+] Generating SBOM from mounted path:{mount_path}")
+
+    (Path(output)/"sboms").mkdir(exist_ok=True)
+    
+    sbom=Path(output)/"sboms"/f"{image_name}.cdx.json"
+
+    try:
+        #using syft on mounted path for the image provided by aws
+        subprocess.run(
+            ["syft","--override-default-catalogers","image",str(mount_path),"-o",f"cyclonedx-json={sbom}"],check=True
+        )
+
+    except Exception as e:
+        print(f"[-] SBOM Generation failed: {e}")
+        return None
+        
+    if sbom.exists():
+        print(f"[+] SBOM generated with name:{sbom}")
+        return str(sbom)
+    
+    
+    else:
+        print("[-] Critical error: failed to save SBOM")
+        return None
+
+
 def generate_sbom(image_path):
     print(f"[+] Generating SBOM from image: {image_path}")
 
