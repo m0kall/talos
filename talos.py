@@ -745,12 +745,15 @@ def aws_cleanup(ec2_client,instance_id,volume_id):
 
     if instance_id:
 
-        ec2_client.terminate_instances(InstanceIds=[instance_id])
+        try:
+            ec2_client.terminate_instances(InstanceIds=[instance_id])
 
-        #wait until instance is successfully terminated
-        ec2_client.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
-        print(f"[+] Instance {instance_id} successfully terminated!")
+            #wait until instance is successfully terminated
+            ec2_client.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
+            print(f"[+] Instance {instance_id} successfully terminated!")
 
+        except Exception as e:
+            print(f"[-] Could not terminate instance {instance_id}: {e}. Please terminate manually")
     if volume_id:
 
         try:
@@ -833,7 +836,8 @@ def scan_img(sbom_path):
 #note: you can change region here and it will take effect on the whole program
 #keep in mind that with our default values it might not work so you may also have to change other settings  (e.g. other regions might not have t3.micro available)
 #default region is us-east-1 and volumes/instances goe to us-east-1a
-def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
+#default profile name is talos-ssm-profile.this can be changed by using argument --profile while running talos
+def scan_image_aws(ami_id,bucket_name,profile_name="talos-ssm-profile",region="us-east-1"):
     
     #default to a to zone of target region
     availability_zone=f"{region}a"
@@ -847,15 +851,19 @@ def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
     try:
         snapshot_id=aws_get_snapshot_id(ec2,ami_id)
         if not snapshot_id:
-            print("[-]Snapshot id retrieval failed")
+            print("[-] Snapshot id retrieval failed")
             return None
         
-        instance_id=aws_launch_worker(ec2,"talos-ssm-profile",availability_zone)
+        instance_id=aws_launch_worker(ec2,profile_name,availability_zone)
         if not instance_id:
             print("[-] Instance retrieval failed")
             return None
         
         print(f"[+] Worker instance launched successfully with id: {instance_id}")
+
+        #wait for instance to reach running state (dont attach while instance is pending)
+        ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+
         volume_id=aws_create_and_attach_volume(ec2,snapshot_id,instance_id,availability_zone)
         if volume_id:
             print(f"[+] Volume {volume_id} attached and running successfully")
@@ -867,6 +875,7 @@ def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
         #after setup is complete we send the commands to our created instance on aws
         #first set of commands is to set proper sizes for ram and mount the ami we want to scan (target folder)
         #this returns status (ok,True/False) output(out) and error message if any(err)
+        print("[!]Prepairing worker....")
         ok, out, err= aws_run_command(ssm, instance_id, [
             f"sudo fallocate -l {SWAP_SIZE}G /swapfile",
             "sudo chmod 600 /swapfile",
@@ -877,10 +886,13 @@ def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
         ])
 
         if not ok:
-            print(f"[-]Failed to prepare and mount volume: {err}")
+            print(f"[-] Failed to prepare and mount volume: {err}")
             return None
+        else:
+            print("[+] Worker set-up is complete")
         
         #second set of commands is for installing talos
+        print("[!] Installing Talos on worker...")
         ok, out, err= aws_run_command(ssm, instance_id, [
             "sudo apt-get update",
             "sudo apt-get install -y git",
@@ -894,6 +906,8 @@ def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
         if not ok:
             print(f"[-]Talos installation on worker failed: {err}")
             return None
+        else:
+            print("[+] Talos installation completed")
         
         
         #ami name normalization
@@ -901,6 +915,7 @@ def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
 
         #final set of commands is creating a script that runs talos and scan the ami from the mounted volume
         #the result json is uploaded to the provided s3 bucket
+        print("[!] Scanning AMI on worker.This might take a while...")
         remote_script= (
             "import talos, boto3\n"
             f"sbom = talos.generate_sbom_from_mounted_path('/mnt/target', '{image_name}', talos.BASE_DIR)\n"
@@ -1302,7 +1317,7 @@ def handle_scan(args):
             print("[-] Please also use --bucket <bucket_name> it is needed for downloading the results ")
             sys.exit(1)
         if args.image:
-            handle_online_scan([args.image],args.bucket)
+            handle_online_scan([args.image],args.bucket,args.profile)
         
         elif args.file:
 
@@ -1312,7 +1327,7 @@ def handle_scan(args):
                     if not imgs:
                         print("[-] File does not contain any image identifiers")
                     else:
-                        handle_online_scan(imgs,args.bucket)
+                        handle_online_scan(imgs,args.bucket,args.profile)
             else:
                 print(f"[-] File {args.file} does not exist")
         else:
@@ -1387,7 +1402,7 @@ def handle_display(args):
         print("[-] You must provide an argument. Use 'talos display -h' for help")
 
 #used for scanning multiple aws images
-def handle_online_scan(identifiers,bucket_name):
+def handle_online_scan(identifiers,bucket_name,profile_name):
 
     for identifier in identifiers:
         if "/" not in identifier:
@@ -1398,7 +1413,7 @@ def handle_online_scan(identifiers,bucket_name):
         
         if provider=="aws":
             print(f"[+] Scanning {identifier} via AWS...")
-            result=scan_image_aws(image_id,bucket_name)
+            result=scan_image_aws(image_id,bucket_name,profile_name)
             if not result:
                 print(f"[-] Failed scanning {identifier}")
 
@@ -1462,6 +1477,13 @@ def main():
         "--image",
         help="Provide path to image file to start generating SBOM and scan for vulnerabilities"
     )
+
+    scan_parser.add_argument(
+        "--profile",
+        default="talos-ssm-profile",
+        help="IAM instance profile name. This contains SSM and S3 permissions for the worker instance. Default name is talos-ssm-profile "
+    )
+
     #2do?
     #scan_parser.add_argument(
     #    "--sbom",
