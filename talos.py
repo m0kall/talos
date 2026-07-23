@@ -9,6 +9,17 @@ import urllib.request
 from tabulate import tabulate
 import openpyxl
 from datetime import datetime
+import boto3
+import time
+
+
+#Based on numerous test, with these constants it is guranteed that there will be enough ram & disk space for talos to work on an AWS instance
+#using swap will produce slower results but we dont ask for more system ram
+#You can always use your prefered values at your own risk.
+
+INSTANCE_TYPE="t3.micro"
+ROOT_DISK= 20
+SWAP_SIZE= 2
 
 ##anchoring path to script directory
 BASE_DIR= Path(__file__).resolve().parent
@@ -481,35 +492,6 @@ def save_merged(scan_path,image_name,out_path):
 
     return str(out_file)
 
-#this is used on aws enviroment,2do --online argument
-def generate_sbom_from_mounted_path(mount_path,image_name,output):
-
-    print(f"[+] Generating SBOM from mounted path:{mount_path}")
-
-    (Path(output)/"sboms").mkdir(exist_ok=True)
-    
-    sbom=Path(output)/"sboms"/f"{image_name}.cdx.json"
-
-    try:
-        #using syft on mounted path for the image provided by aws
-        subprocess.run(
-            ["syft","--override-default-catalogers","image",str(mount_path),"-o",f"cyclonedx-json={sbom}"],check=True
-        )
-
-    except Exception as e:
-        print(f"[-] SBOM Generation failed: {e}")
-        return None
-        
-    if sbom.exists():
-        print(f"[+] SBOM generated with name:{sbom}")
-        return str(sbom)
-    
-    
-    else:
-        print("[-] Critical error: failed to save SBOM")
-        return None
-
-
 def generate_sbom(image_path):
     print(f"[+] Generating SBOM from image: {image_path}")
 
@@ -573,6 +555,217 @@ def generate_sbom(image_path):
         print("[-] Unable to save sbom ")
         return None
 
+#this is used on aws enviroment,2do --online argument
+def generate_sbom_from_mounted_path(mount_path,image_name,output):
+
+    print(f"[+] Generating SBOM from mounted path:{mount_path}")
+
+    (Path(output)/"sboms").mkdir(exist_ok=True)
+    
+    sbom=Path(output)/"sboms"/f"{image_name}.cdx.json"
+
+    try:
+        #using syft on mounted path for the image provided by aws
+        subprocess.run(
+            ["syft","--override-default-catalogers","image",str(mount_path),"-o",f"cyclonedx-json={sbom}"],check=True
+        )
+
+    except Exception as e:
+        print(f"[-] SBOM Generation failed: {e}")
+        return None
+        
+    if sbom.exists():
+        print(f"[+] SBOM generated with name:{sbom}")
+        return str(sbom)
+    
+    
+    else:
+        print("[-] Critical error: failed to save SBOM")
+        return None
+
+#look snapshot for given AMI (user input) to create the volume needed in order to scan it
+def aws_get_snapshot_id(ec2_client,ami_id):
+    
+    #get information about users given ami
+    response= ec2_client.describe_images(ImageIds=[ami_id])
+
+    #save aws response info inside a list
+    images= response.get("Images",[])
+
+    if not images:
+        print(f"[-] AMI with name {ami_id} not found")
+        return None
+    
+    #look for all disks and get the root disk
+    #the root disk is the disk that we actually need to scan (contains all the info our scanners want)
+    for device in images[0].get("BlockDeviceMappings",[]):
+        if "Ebs" in device:
+            #return the snapshot of the root disk
+            return device["Ebs"]["SnapshotId"]
+    
+    print(f"[-] No snapshot found for AMI {ami_id}")        
+    return None
+
+#in testing there were some problems on installation of talos when using some specific amis
+#with this function we always use a specific one that the pipeline worked correctly
+#ubuntu 24.04 AMI, always succeded in installing talos correctly
+#this has nothing to do with the users input of ami that needs to be scanned
+#if for any reason you want to use a different ami you can change this information but it is not recommended
+def aws_get_worker_ami(ec2_client):
+
+    response= ec2_client.describe_images(
+
+        #this amis owned by a specific account
+        #it grabs  the official company that makes ubuntu (Canonical) so we get an official ubuntu image not a random one
+        Owners=["099720109477"],
+        
+        #these filters find only available amis with the exact naming pattern of official ubuntu 24.04 (Noble) amis
+        Filters=[
+
+            {"Name":"name","Values":["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]},
+            {"Name":"state","Values":["available"]}
+        ]
+    )
+    #get all images that mach above filters etc
+    images=response.get("Images",[])
+
+    if not images:
+        print(f"[-] Could not find a worker AMI")
+        return None
+    
+    #find the newest image/latest version by comparing creation dates of amis
+    newest_ami=None
+    newest_date=""
+
+    for image in images:
+
+        current_date=image["CreationDate"]
+
+        if current_date>newest_date:
+            newest_date=current_date
+            newest_ami=image
+            
+    if newest_ami:
+        return newest_ami["ImageId"]
+    
+    else:
+        print("[-] Critical error: failed lookup for newest version of worker AMI")
+        return None
+
+#launch instance/ami on worker where the scanning will ocure
+def aws_launch_worker(ec2_client,instance_profile,availability_zone):
+    
+    #get latest version
+    worker_ami=aws_get_worker_ami(ec2_client)
+    
+    if not worker_ami:
+        print("[-] Critical error while fetching worker ami")
+        return
+    
+    #run the instance using our default configurations (constants at lines 20-22)
+    response=ec2_client.run_instances(
+        ImageId=worker_ami,
+        InstanceType= INSTANCE_TYPE,
+        IamInstanceProfile={"Name":instance_profile}, #this has the permissions. user need to set them up for talos to work correctly. See readme on github about these permissions
+        Placement={"AvailabilityZone":availability_zone},
+        BlockDeviceMappings=[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":ROOT_DISK}}],
+        MinCount=1,
+        MaxCount=1
+    )
+    #this returns the instance id. basically it works like: get list of instances,get the 1st instance on it,get id
+    return response["Instances"][0]["InstanceId"]
+
+#wait untile worker is ready to recieve commands through ssm
+def aws_wait_for_ssm(ssm_client,instance_id,timeout=120):
+    print("[!] Waiting for worker instance to register with SSM")
+    wait=0
+
+    while wait<timeout:
+        response=ssm_client.describe_instance_information(
+
+            Filters=[{"Key":"InstanceIds","Values":[instance_id]}]
+        )
+        if response["InstanceInformationList"]:
+            print("[+] Worker instance is online successfully")
+            return True
+        time.sleep(5)
+        wait+=5
+
+    print("[-] Timed out waiting for SSM. Worker instance offline")
+    return False
+
+#send and run shell commands to worker and wait for them to finish. max wait time is set to 10 minutes.in testing results needed max 5minutes
+#this function returns 3 things: if command succeded, command output and error message if any
+def aws_run_command(ssm_client,instance_id,commands,timeout=600):
+
+    response=ssm_client.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Parameters={"commands":commands}
+    )
+    #save command unique id to check on its progress
+    command_id=response["Command"]["CommandId"]
+
+    #wait for command to run
+    wait=0
+    while wait<timeout:
+        time.sleep(5)
+        wait+=5
+        try:
+            result=ssm_client.get_command_invocation(CommandId=command_id,InstanceId=instance_id) #check on command status
+        except ssm_client.exceptions.InvocationDoesNotExist:
+            continue #ssm sometimes needs more time
+        
+        #stop when command finishes
+        if result["Status"]in ("Success","Failed","Cancelled","TimedOut"):
+            return result["Status"]=="Success",result.get("StandardOutputContent",""),result.get("StandardErrorContent","")
+             
+    return False,"","Timed out while waiting for command to run"
+
+def aws_create_and_attach_volume(ec2_client,snapshot_id,instance_id,availability_zone):
+    #create volume from snapshot
+    volume=ec2_client.create_volume(SnapshotId=snapshot_id,AvailabilityZone=availability_zone)
+    #save volume unique id
+    volume_id=volume["VolumeId"]
+    
+    #wait for volume to be ready
+    ec2_client.get_waiter("volume_available").wait(VolumeIds=[volume_id])
+    
+    #attach volume to worker
+    ec2_client.attach_volume(VolumeId=volume_id, InstanceId=instance_id, Device="/dev/sdf")
+
+    #wait again until volume is ready
+    ec2_client.get_waiter("volume_in_use").wait(VolumeIds=[volume_id])
+
+    #used to terminate volume on the end of the programm
+    return volume_id
+
+def aws_cleanup(ec2_client,instance_id,volume_id):
+    print("[!] Terminating AWS resources...")
+
+    if instance_id:
+
+        ec2_client.terminate_instances(InstanceIds=[instance_id])
+
+        #wait until instance is successfully terminated
+        ec2_client.get_waiter("instance_terminated").wait(InstanceIds=[instance_id])
+        print(f"[+] Instance {instance_id} successfully terminated!")
+
+    if volume_id:
+
+        try:
+            time.sleep(5) #wait a few extra seconds for safety
+            ec2_client.delete_volume(VolumeId=volume_id)
+            print(f"[+] Volume {volume_id} successfully terminated!")
+
+        except Exception as e:
+
+            print(f"[!] Could not delete volume {volume_id}: {e}.Please try manual termination of both instance and volume!")
+
+    print("[+] Cleanup completed successfully")
+
+    return
+
 def scan_img(sbom_path):
     print(f"[+] Scanning SBOM: {sbom_path}")
 
@@ -635,6 +828,122 @@ def scan_img(sbom_path):
     except Exception as e :
         print(f"[-] Scanning Failed: {e}")
         return None
+
+#master-agent image scan for aws provider
+#note: you can change region here and it will take effect on the whole program
+#keep in mind that with our default values it might not work so you may also have to change other settings  (e.g. other regions might not have t3.micro available)
+#default region is us-east-1 and volumes/instances goe to us-east-1a
+def scan_image_aws(ami_id,bucket_name,region="us-east-1"):
+    
+    #default to a to zone of target region
+    availability_zone=f"{region}a"
+    session=boto3.Session(region_name=region) #credentias configured using env vars
+    ec2=session.client("ec2")
+    ssm=session.client("ssm")
+    s3=session.client("s3")
+    instance_id=None
+    volume_id=None
+
+    try:
+        snapshot_id=aws_get_snapshot_id(ec2,ami_id)
+        if not snapshot_id:
+            print("[-]Snapshot id retrieval failed")
+            return None
+        
+        instance_id=aws_launch_worker(ec2,"talos-ssm-profile",availability_zone)
+        if not instance_id:
+            print("[-] Instance retrieval failed")
+            return None
+        
+        print(f"[+] Worker instance launched successfully with id: {instance_id}")
+        volume_id=aws_create_and_attach_volume(ec2,snapshot_id,instance_id,availability_zone)
+        if volume_id:
+            print(f"[+] Volume {volume_id} attached and running successfully")
+
+        if not aws_wait_for_ssm(ssm,instance_id):
+            print("[-] Critical error when waiting for ssm response!")
+            return None
+        
+        #after setup is complete we send the commands to our created instance on aws
+        #first set of commands is to set proper sizes for ram and mount the ami we want to scan (target folder)
+        #this returns status (ok,True/False) output(out) and error message if any(err)
+        ok, out, err= aws_run_command(ssm, instance_id, [
+            f"sudo fallocate -l {SWAP_SIZE}G /swapfile",
+            "sudo chmod 600 /swapfile",
+            "sudo mkswap /swapfile",
+            "sudo swapon /swapfile",
+            "sudo mkdir -p /mnt/target",
+            "sudo mount -o ro /dev/nvme1n1p1 /mnt/target"
+        ])
+
+        if not ok:
+            print(f"[-]Failed to prepare and mount volume: {err}")
+            return None
+        
+        #second set of commands is for installing talos
+        ok, out, err= aws_run_command(ssm, instance_id, [
+            "sudo apt-get update",
+            "sudo apt-get install -y git",
+            "cd /home/ubuntu",
+            "git clone https://github.com/m0kall/talos.git",
+            "cd talos",
+            "chmod +x install.sh",
+            "./install.sh"
+        ])
+
+        if not ok:
+            print(f"[-]Talos installation on worker failed: {err}")
+            return None
+        
+        
+        #ami name normalization
+        image_name=ami_id.replace("/","_")
+
+        #final set of commands is creating a script that runs talos and scan the ami from the mounted volume
+        #the result json is uploaded to the provided s3 bucket
+        remote_script= (
+            "import talos, boto3\n"
+            f"sbom = talos.generate_sbom_from_mounted_path('/mnt/target', '{image_name}', talos.BASE_DIR)\n"
+            "scan_paths = talos.scan_img(sbom) if sbom else None\n"
+            f"merged = talos.save_merged(scan_paths, '{image_name}', talos.BASE_DIR) if scan_paths else None\n"
+            "if merged:\n"
+            f"    boto3.client('s3').upload_file(merged, '{bucket_name}', '{image_name}-merged.json')\n"
+            "    print('UPLOAD_OK')\n"
+            "else:\n"
+            "    print('SCAN_FAILED')\n"
+        )
+        #this runs the above script timeout time is 15 minutes since scanning can take a while
+        ok, out, err= aws_run_command(ssm, instance_id, [
+            "cd /home/ubuntu/talos",
+            f"cat > online_run.py << 'PYEOF'\n{remote_script}PYEOF",
+            "python3 online_run.py"
+        ], timeout=900)
+
+        if not ok or "UPLOAD_OK" not in out:
+            print(f"[-] Remote scan and upload of results failed: {out}\n{err}")
+            return None
+        
+        #local save directory
+        local_dir=BASE_DIR/"merged"
+        local_dir.mkdir(exist_ok=True)
+        local_file=local_dir/f"{image_name}-merged.json"
+        
+        #download,save results to directory and clean file from bucket
+        s3.download_file(bucket_name,f"{image_name}-merged.json",str(local_file))
+        s3.delete_object(Bucket=bucket_name,Key=f"{image_name}-merged.json")
+
+        print(f"[+] Online scan completed successfully! Results saved at: {local_file}")
+        return str(local_file)
+    
+    #just in case there is a session error or anything, report to user
+    except Exception as e:
+        print(f"[-]Critical error while running scans on worker machine: {e}.\n[!] Note that some scans might have been completed while others not started.Please check and try again.")
+        return None
+    
+    #whatever happens either failed or successful scan we always terminate the instance and bucket
+    finally:
+        aws_cleanup(ec2,instance_id,volume_id)
+            
 
 #used for sorting cves at display image function
 def get_sort_value(r):
@@ -986,6 +1295,30 @@ def exportall():
 #============================================================================= COMMAND HANDLING =======================================================================================
 def handle_scan(args):
 
+    #same logic as below but for aws provider
+    if args.online:
+
+        if not args.bucket:
+            print("[-] Please also use --bucket <bucket_name> it is needed for downloading the results ")
+            sys.exit(1)
+        if args.image:
+            handle_online_scan([args.image],args.bucket)
+        
+        elif args.file:
+
+            if Path(args.file).exists():
+                with open(args.file,"r") as f:
+                    imgs=[line.strip() for line in f if line.strip()]
+                    if not imgs:
+                        print("[-] File does not contain any image identifiers")
+                    else:
+                        handle_online_scan(imgs,args.bucket)
+            else:
+                print(f"[-] File {args.file} does not exist")
+        else:
+            print(f"[-] This command requires either --image or --file")
+        return
+
     if args.image: #scan --image img/path
 
         sbomPath= generate_sbom(args.image)
@@ -1053,6 +1386,30 @@ def handle_display(args):
     else:
         print("[-] You must provide an argument. Use 'talos display -h' for help")
 
+#used for scanning multiple aws images
+def handle_online_scan(identifiers,bucket_name):
+
+    for identifier in identifiers:
+        if "/" not in identifier:
+            print(f"[!] Skipped {identifier}: Missing cloud prefix")
+            continue
+        #grab provider and image id by splitting the txt file on symbol /
+        provider,image_id=identifier.split("/",1)
+        
+        if provider=="aws":
+            print(f"[+] Scanning {identifier} via AWS...")
+            result=scan_image_aws(image_id,bucket_name)
+            if not result:
+                print(f"[-] Failed scanning {identifier}")
+
+        elif provider=="gcp":
+        
+            print("2DO GOOGLE??")
+        
+        else:
+            print(f"[!]Skipped {identifier}: unsupported provider")
+
+    return
 
 def handle_export(args):
     exportall()
@@ -1120,7 +1477,12 @@ def main():
     #2DO
     scan_parser.add_argument(
         "--online",
-        help="username and password for online thingy TODO"
+        action="store_true",
+        help="Scan a VM image directly from a cloud provider (use cloud-prefixed identifiers aws/ami-xxx for aws and 2DOGOOGLEMAYBE?)"
+    )
+    scan_parser.add_argument(
+        "--bucket",
+        help="S3 bucket name used to download scan results from the cloud worker AWS "
     ) 
 
     #====arguments for display command
