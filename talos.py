@@ -833,8 +833,6 @@ def scan_img(sbom_path):
         return None
 
 #master-agent image scan for aws provider
-#note: you can change region here and it will take effect on the whole program
-#keep in mind that with our default values it might not work so you may also have to change other settings  (e.g. other regions might not have t3.micro available)
 #default region is us-east-1 and volumes/instances goe to us-east-1a
 #default profile name is talos-ssm-profile.this can be changed by using argument --profile while running talos
 def scan_image_aws(ami_id,bucket_name,profile_name="talos-ssm-profile",region="us-east-1"):
@@ -887,7 +885,7 @@ def scan_image_aws(ami_id,bucket_name,profile_name="talos-ssm-profile",region="u
         #after setup is complete we send the commands to our created instance on aws
         #first set of commands is to set proper sizes for ram and mount the ami we want to scan (target folder)
         #this returns status (ok,True/False) output(out) and error message if any(err)
-        print("[!]Prepairing worker....")
+        print("[!] Prepairing worker....")
         ok, out, err= aws_run_command(ssm, instance_id, [
             f"sudo fallocate -l {SWAP_SIZE}G /swapfile",
             "sudo chmod 600 /swapfile",
@@ -1420,7 +1418,7 @@ def handle_online_scan(identifiers,bucket_name,profile_name,region="us-east-1"):
         if "/" not in identifier:
             print(f"[!] Skipped {identifier}: Missing cloud prefix")
             continue
-        
+
         #grab provider and image id by splitting the txt file on symbol /
         provider,image_id=identifier.split("/",1)
         
