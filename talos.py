@@ -840,13 +840,25 @@ def scan_img(sbom_path):
 def scan_image_aws(ami_id,bucket_name,profile_name="talos-ssm-profile",region="us-east-1"):
     
     #default to a to zone of target region
-    availability_zone=f"{region}a"
+    #availability_zone=f"{region}a"
+
     session=boto3.Session(region_name=region) #credentias configured using env vars
     ec2=session.client("ec2")
     ssm=session.client("ssm")
     s3=session.client("s3")
     instance_id=None
     volume_id=None
+
+    #this looksup the availability zones for our region and defalts to the first one we see
+    #during testing using default region us-east-1 this returs us-east-1a
+    try:
+        zones=ec2.describe_availability_zones(Filters=[{"Name":"region-name","Values":[region]}])
+        availability_zone=zones["AvailabilityZones"][0]["ZoneName"]
+
+    except Exception as e:
+        print(f"[-] Could not retrieve availability zones for region {region}: {e}")
+        return None
+
 
     try:
         snapshot_id=aws_get_snapshot_id(ec2,ami_id)
@@ -1317,7 +1329,7 @@ def handle_scan(args):
             print("[-] Please also use --bucket <bucket_name> it is needed for downloading the results ")
             sys.exit(1)
         if args.image:
-            handle_online_scan([args.image],args.bucket,args.profile)
+            handle_online_scan([args.image],args.bucket,args.profile,args.region)
         
         elif args.file:
 
@@ -1327,7 +1339,7 @@ def handle_scan(args):
                     if not imgs:
                         print("[-] File does not contain any image identifiers")
                     else:
-                        handle_online_scan(imgs,args.bucket,args.profile)
+                        handle_online_scan(imgs,args.bucket,args.profile,args.region)
             else:
                 print(f"[-] File {args.file} does not exist")
         else:
@@ -1402,18 +1414,19 @@ def handle_display(args):
         print("[-] You must provide an argument. Use 'talos display -h' for help")
 
 #used for scanning multiple aws images
-def handle_online_scan(identifiers,bucket_name,profile_name):
+def handle_online_scan(identifiers,bucket_name,profile_name,region="us-east-1"):
 
     for identifier in identifiers:
         if "/" not in identifier:
             print(f"[!] Skipped {identifier}: Missing cloud prefix")
             continue
+        
         #grab provider and image id by splitting the txt file on symbol /
         provider,image_id=identifier.split("/",1)
         
         if provider=="aws":
             print(f"[+] Scanning {identifier} via AWS...")
-            result=scan_image_aws(image_id,bucket_name,profile_name)
+            result=scan_image_aws(image_id,bucket_name,profile_name,region)
             if not result:
                 print(f"[-] Failed scanning {identifier}")
 
@@ -1505,6 +1518,12 @@ def main():
     scan_parser.add_argument(
         "--bucket",
         help="S3 bucket name used to download scan results from the cloud worker AWS "
+    )
+
+    scan_parser.add_argument(
+        "--region",
+        default="us-east-1",
+        help="AWS region to use for the worker instance,volume and snapshot lookup. Must match the region of target AMI. Defaults to us-east-1"
     ) 
 
     #====arguments for display command
