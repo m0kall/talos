@@ -1,12 +1,17 @@
 #!/usr/bin/env bash 
 
 #this tells the os to run this file using bash. we can use ./install.sh on it
-#it need to be on the first line
+#it needs to be on the first line
 
 #stops the script if any command fails.
 set -e
 
 echo "====== Talos Installer ======"
+
+#refresh apt package index before installing anything
+#some cloud images couldnt install pip without this
+echo "[+] Refreshing apt package index..."
+sudo apt-get update -qq
 
 
 #apt packages installation: qemu-utils, parted
