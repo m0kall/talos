@@ -36,7 +36,7 @@ fi
 
 
 #pip packages installation: tabulate,openpyxl,boto3 etc
-for pkg in tabulate openpyxl boto3 paramiko google-cloud-storage google-cloud-compute pyOpenSSL; do
+for pkg in tabulate openpyxl boto3 paramiko google-cloud-storage google-cloud-compute; do
     if pip3 show "$pkg" &> /dev/null; then
         echo "[!] Skipping Package $pkg (already installed)"
     else
@@ -47,6 +47,10 @@ for pkg in tabulate openpyxl boto3 paramiko google-cloud-storage google-cloud-co
         fi
     fi
 done
+
+#force a modern pyOpenSSL regardless of any apt-installed version, old version conflicts with boto3
+echo "[+] Installing/upgrading pyOpenSSL..."
+sudo pip3 install pyOpenSSL --break-system-packages --ignore-installed --upgrade
 
 #installation of scanners (syft,trivy,grype,osv-scanner)
 #if command -v "scanner" exists= scanner already installed
