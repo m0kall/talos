@@ -41,11 +41,10 @@ for pkg in tabulate openpyxl boto3 paramiko google-cloud-storage google-cloud-co
         echo "[!] Skipping Package $pkg (already installed)"
     else
         echo "[+] Installing package $pkg..."
-        if ! sudo pip3 install "$pkg" --break-system-packages; then
+        if ! sudo pip3 install "$pkg" --break-system-packages --ignore-installed; then
             echo "[-] --break-system-packages attempt failed for $pkg, trying without flag..."
-            sudo pip3 install "$pkg"
+            sudo pip3 install --ignore-installed"$pkg"
         fi
-        #sudo pip3 install "$pkg" --break-system-packages 2>/dev/null || sudo pip3 install "$pkg" #--break etc is needed if ubuntu blocks global installs
     fi
 done
 
