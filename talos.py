@@ -708,7 +708,7 @@ def aws_wait_for_ssm(ssm_client,instance_id,timeout=120):
 
 #send and run shell commands to worker and wait for them to finish. max wait time is set to 10 minutes.in testing results needed max 5minutes
 #this function returns 3 things: if command succeded, command output and error message if any
-def aws_run_command(ssm_client,instance_id,commands,timeout=600):
+def aws_run_command(ssm_client,instance_id,commands,timeout=1200):
 
     response=ssm_client.send_command(
         InstanceIds=[instance_id],
