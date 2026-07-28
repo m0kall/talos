@@ -18,11 +18,10 @@ from google.cloud import storage
 
 #Based on numerous test, with these constants it is guranteed that there will be enough ram & disk space for talos to work on an AWS instance within a reasonable time
 #scan per image should take around 10minutes (depending on target ami & its vulnerabilities)
-#using swap will produce slower results but we dont ask for more system ram
 #You can always use your prefered values at your own risk.
-INSTANCE_TYPE="t3.micro"
+INSTANCE_TYPE="t3.medium"
 ROOT_DISK= 20
-SWAP_SIZE= 2
+#SWAP_SIZE= 2
 
 #these are the constants for the GCP machine.again you can always use your prefered settings by just changing these
 #with these settings scan per image is completed within around 15minutes (depenting on target img & its vulrenabilities)
@@ -708,7 +707,7 @@ def aws_wait_for_ssm(ssm_client,instance_id,timeout=120):
 
 #send and run shell commands to worker and wait for them to finish. max wait time is set to 10 minutes.in testing results needed max 5minutes
 #this function returns 3 things: if command succeded, command output and error message if any
-def aws_run_command(ssm_client,instance_id,commands,timeout=1200):
+def aws_run_command(ssm_client,instance_id,commands,timeout=600):
 
     response=ssm_client.send_command(
         InstanceIds=[instance_id],
@@ -1218,10 +1217,10 @@ def aws_scan_image(ami_id,bucket_name,profile_name="talos-ssm-profile",region="u
         #this returns status (ok,True/False) output(out) and error message if any(err)
         print("[!] Prepairing worker....")
         ok, out, err= aws_run_command(ssm, instance_id, [
-            f"sudo fallocate -l {SWAP_SIZE}G /swapfile",
-            "sudo chmod 600 /swapfile",
-            "sudo mkswap /swapfile",
-            "sudo swapon /swapfile",
+            #f"sudo fallocate -l {SWAP_SIZE}G /swapfile",
+            #"sudo chmod 600 /swapfile",
+            #"sudo mkswap /swapfile",
+            #"sudo swapon /swapfile",
             "sudo mkdir -p /mnt/target",
             "sudo mount -o ro /dev/nvme1n1p1 /mnt/target"
         ])
@@ -1268,12 +1267,12 @@ def aws_scan_image(ami_id,bucket_name,profile_name="talos-ssm-profile",region="u
             "else:\n"
             "    print('SCAN_FAILED')\n"
         )
-        #this runs the above script timeout time is 30 minutes since scanning can take a while
+        #this runs the above script timeout time is 15 minutes since scanning can take a while
         ok, out, err= aws_run_command(ssm, instance_id, [
             "cd /home/ubuntu/talos",
             f"cat > online_run.py << 'PYEOF'\n{remote_script}PYEOF",
             "python3 online_run.py"
-        ], timeout=1800)
+        ], timeout=900)
 
         if not ok or "UPLOAD_OK" not in out:
             print(f"[-] Remote scan and upload of results failed: {out}\n{err}")
