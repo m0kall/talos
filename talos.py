@@ -1268,12 +1268,12 @@ def aws_scan_image(ami_id,bucket_name,profile_name="talos-ssm-profile",region="u
             "else:\n"
             "    print('SCAN_FAILED')\n"
         )
-        #this runs the above script timeout time is 15 minutes since scanning can take a while
+        #this runs the above script timeout time is 30 minutes since scanning can take a while
         ok, out, err= aws_run_command(ssm, instance_id, [
             "cd /home/ubuntu/talos",
             f"cat > online_run.py << 'PYEOF'\n{remote_script}PYEOF",
             "python3 online_run.py"
-        ], timeout=900)
+        ], timeout=1800)
 
         if not ok or "UPLOAD_OK" not in out:
             print(f"[-] Remote scan and upload of results failed: {out}\n{err}")
