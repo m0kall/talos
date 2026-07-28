@@ -19,7 +19,7 @@ from google.cloud import storage
 #Based on numerous test, with these constants it is guranteed that there will be enough ram & disk space for talos to work on an AWS instance within a reasonable time
 #scan per image should take around 10minutes (depending on target ami & its vulnerabilities)
 #You can always use your prefered values at your own risk.
-INSTANCE_TYPE="t3.medium"
+INSTANCE_TYPE="t3.small"
 ROOT_DISK= 20
 #SWAP_SIZE= 2
 
