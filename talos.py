@@ -1044,7 +1044,7 @@ def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_a
             "chmod +x install.sh",
             "sudo ./install.sh"],timeout=900)
         if not ok:
-            print(f"[-] Installation of talos failed")
+            print(f"[-] Installation of talos failed: {err}\n")
             return None
         print("[+] Talos installation on worker completed successfully")
 
@@ -1245,7 +1245,7 @@ def aws_scan_image(ami_id,bucket_name,profile_name="talos-ssm-profile",region="u
         ])
 
         if not ok:
-            print(f"[-]Talos installation on worker failed: {err}")
+            print(f"[-]Talos installation on worker failed: {err}\n")
             return None
         else:
             print("[+] Talos installation completed")
