@@ -11,15 +11,27 @@ import openpyxl
 from datetime import datetime
 import boto3
 import time
+import paramiko
+from google.cloud import compute_v1
+from google.cloud import storage 
 
 
-#Based on numerous test, with these constants it is guranteed that there will be enough ram & disk space for talos to work on an AWS instance
+#Based on numerous test, with these constants it is guranteed that there will be enough ram & disk space for talos to work on an AWS instance within a reasonable time
+#scan per image should take around 10minutes (depending on target ami & its vulnerabilities)
 #using swap will produce slower results but we dont ask for more system ram
 #You can always use your prefered values at your own risk.
-
 INSTANCE_TYPE="t3.micro"
 ROOT_DISK= 20
 SWAP_SIZE= 2
+
+#these are the constants for the GCP machine.again you can always use your prefered settings by just changing these
+#with these settings scan per image is completed within around 15minutes (depenting on target img & its vulrenabilities)
+GCP_INSTANCE_TYPE="e2-medium"
+GCP_ROOT_DISK=20
+GCP_DISK_TYPE="pd-balanced"
+GCP_IMAGE_FAMILY="ubuntu-2404-lts-amd64" #this is the instance running os.
+GCP_IMAGE_PROJECT="ubuntu-os-cloud" #gcp owner of the image family
+
 
 ##anchoring path to script directory
 BASE_DIR= Path(__file__).resolve().parent
@@ -555,7 +567,7 @@ def generate_sbom(image_path):
         print("[-] Unable to save sbom ")
         return None
 
-#this is used on aws enviroment,2do --online argument
+#this is used on aws/gcp enviroment
 def generate_sbom_from_mounted_path(mount_path,image_name,output):
 
     print(f"[+] Generating SBOM from mounted path:{mount_path}")
@@ -565,7 +577,7 @@ def generate_sbom_from_mounted_path(mount_path,image_name,output):
     sbom=Path(output)/"sboms"/f"{image_name}.cdx.json"
 
     try:
-        #using syft on mounted path for the image provided by aws
+        #using syft on mounted path for the image provided by aws/gcp
         subprocess.run(
             ["syft","--override-default-catalogers","image",str(mount_path),"-o",f"cyclonedx-json={sbom}"],check=True
         )
@@ -609,7 +621,7 @@ def aws_get_snapshot_id(ec2_client,ami_id):
 #in testing there were some problems on installation of talos when using some specific amis
 #with this function we always use a specific one that the pipeline worked correctly
 #ubuntu 24.04 AMI, always succeded in installing talos correctly
-#this has nothing to do with the users input of ami that needs to be scanned
+#this has nothing to do with the users input of ami that needs to be scanned, this affects the instance running os
 #if for any reason you want to use a different ami you can change this information but it is not recommended
 def aws_get_worker_ami(ec2_client):
 
@@ -769,6 +781,325 @@ def aws_cleanup(ec2_client,instance_id,volume_id):
 
     return
 
+#get the gcp image info the user wants scanned
+def gcp_get_source_image(images_client,project_id,image_name):
+    try:
+        image=images_client.get(project=project_id,image=image_name)
+        return image.self_link
+
+    except Exception as e:
+        print(f"[-] gcp image {image_name} not found: {e}")
+        return None
+
+#ssh key for google (needed for client-master communication)
+def gcp_generate_keypair():
+
+    key=paramiko.RSAKey.generate(2048)
+    #according to gcp standad metadata format this will authenticate us and create a vm username "talos" and connect it with a key
+    public_key_str=f"talos:{key.get_name()} {key.get_base64()} talos"
+
+    return key,public_key_str
+
+#gcp launch worker,boot disk and ssh bind
+def gcp_launch_worker(instances_client,project_id,zone,instance_name,service_account_email,public_key_str):
+
+    #gcp-specific path for our instance type (e2-medium is default) 
+    machine_type=f"zones/{zone}/machineTypes/{GCP_INSTANCE_TYPE}"
+
+    #instance info
+    instance=compute_v1.Instance(
+        name=instance_name,
+        machine_type=machine_type,#left variable is what compute_v1.Instance expects, right is our local variable
+
+        #boot disk for the running instance
+        disks=[
+            compute_v1.AttachedDisk(
+
+                #disk will delete automatically when instances is deleted
+                #no need to write this in termination function
+                #note this is the BOOT disk not the disk that holds target gcp img
+                auto_delete=True,
+                boot=True,
+
+                initialize_params=compute_v1.AttachedDiskInitializeParams(
+
+                    source_image=f"projects/{GCP_IMAGE_PROJECT}/global/images/family/{GCP_IMAGE_FAMILY}", #
+                    disk_size_gb=GCP_ROOT_DISK,
+                    disk_type=f"zones/{zone}/diskTypes/{GCP_DISK_TYPE}",
+                )
+            )
+        ],
+
+        #create an external ip to communicate with machine (using ssh)
+        network_interfaces=[
+            compute_v1.NetworkInterface(
+                access_configs=[compute_v1.AccessConfig(name="External NAT", type_="ONE_TO_ONE_NAT")]
+            )
+        ],
+
+        #extra needed permissions (used for results upload) 
+        service_accounts=[
+            compute_v1.ServiceAccount(email=service_account_email, scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        ],
+
+        #store ssh key on vm for communication
+        metadata=compute_v1.Metadata(
+            items=[compute_v1.Items(key="ssh-keys", value=public_key_str)]
+        ),
+    )
+
+    #create instance opperation (with the settings above)
+    op=instances_client.insert(
+
+        project=project_id,
+        zone=zone,
+        instance_resource=instance
+
+    )
+    #wait for instance setup completion
+    op.result()
+    return instance_name
+
+def gcp_create_attach_disk(disks_client,instances_client,project_id,zone,image_self_link,instance_name,disk_name):
+
+    #create disk
+    disk=compute_v1.Disk(
+        name=disk_name,
+        source_image=image_self_link,
+        #instance disk type (default is pd-balanced)
+        type_=f"zones/{zone}/diskTypes/{GCP_DISK_TYPE}"
+    )
+    op=disks_client.insert(project=project_id,zone=zone,disk_resource=disk)
+    op.result()
+
+    #attach disk to instance
+    attach_op=instances_client.attach_disk(
+        project=project_id,
+        zone=zone,
+        instance=instance_name,
+        #googles specific location of users chosen gcp image disk
+        attached_disk_resource=compute_v1.AttachedDisk(source=f"zones/{zone}/disks/{disk_name}")
+    )
+    #wait for attachment of disk to complete
+    attach_op.result()
+
+    return disk_name
+
+#get workers external ip to send ssh requests
+def gcp_get_ip(instances_client,project_id,zone,instance_name):
+
+    instance=instances_client.get(
+        project=project_id,
+        zone=zone,
+        instance=instance_name
+    )
+    return instance.network_interfaces[0].access_configs[0].nat_ip
+
+
+
+def gcp_wait_for_ssh(ip,private_key,timeout=120):
+
+    print("[!] Waiting for worker to setup ssh connection")
+    wait=0
+
+    #try to connect to worker for max 2minutes
+    while wait<timeout:
+        try:
+            #create ssh client
+            client=paramiko.SSHClient()
+            #get trust
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            #default username is talos a single connect request will only last 10 seconds
+            client.connect(ip,username="talos",pkey=private_key,timeout=10)
+            client.close()
+            print("[+] Worker instance online")
+            return True
+        
+        #retry after 5 seconds
+        except Exception as e:
+            print(f"[!] Connection failure: {e}. Retrying...")
+            time.sleep(5)
+            wait+=5
+
+    print("[-] Timed out while waiting for ssh setup")
+    return False
+
+#same logix as aws_run_command
+def gcp_run_command(ip,private_key,commands,timeout=600):
+
+    try:
+
+        client=paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(ip,username="talos",pkey=private_key,timeout=30)
+
+        full_command=" &&".join(commands) #combine commands to 1 run next only if prev succeedes
+
+        stdin,stdout,stderr=client.exec_command(full_command,timeout=timeout)
+
+        #input=stdout.read().decode()
+        output=stdout.read().decode()
+        error=stderr.read().decode()
+
+        exit_code=stdout.channel.recv_exit_status()
+        client.close()
+
+        if exit_code==0:
+            return True,output,error
+        else:
+            return False,output,error
+        
+    except Exception as e:
+        print("[-] Command failed to run\n")
+        return False,"",str(e)
+
+def gcp_cleanup(instances_client,disks_client,project_id,zone,instance_name,disk_name):
+
+    print("[!] Terminating GCP resources...")
+
+    if instance_name:
+        try:
+            op=instances_client.delete(project=project_id,zone=zone,instance=instance_name)
+            op.result()
+            print(f"[+] Instance {instance_name} successfully deleted")
+
+        except Exception as e:
+            print(f"[-] Could not delete instance {instance_name}: {e}. Please delete manually")
+
+    if disk_name:    
+        try:
+            op=disks_client.delete(project=project_id,zone=zone,disk=disk_name)
+            op.result()
+            print(f"[+] Disk {disk_name} deleted successfully")
+
+        except Exception as e:
+            print(f"[-] Could not delete disk {disk_name}: {e}. Please delete manually")
+
+    print("[+] Cleanup completed successfully")
+    return
+
+
+
+
+def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_account=None):
+
+    #create clients to manage vm/instance,disks,images and buckets
+    instances_client=compute_v1.InstancesClient()
+    disks_client=compute_v1.DisksClient()
+    images_client=compute_v1.ImagesClient()
+    storage_client=storage.Client()
+
+    #normalize names and limit to 63 characters cuz of google restrictions
+    instance_name=f"talos-worker-{image_name}".replace("_","-").replace(".","-")[:63]
+    disk_name=f"talos-disk-{image_name}".replace("_","-").replace(".","-")[:63]
+
+    #grab the acount mail prefers the flag (if given) else env var. please read readme file
+    service_acc_mail=service_account or os.environ.get("TALOS_GCP_SERVICE_ACCOUNT")
+
+    if not service_acc_mail:
+        print("[-] Account email is not set.Please read readme file for setting up")
+        return None
+
+    try:
+        #target image to scan
+        image_self_link=gcp_get_source_image(images_client,project_id,image_name)
+        if not image_self_link:
+            print("[-] Failed while retrieving image")
+            return None
+
+        #ssh connection estabilishment
+        key,public_key_str=gcp_generate_keypair()
+
+        gcp_launch_worker(instances_client,project_id,zone,instance_name,service_acc_mail,public_key_str)
+        print(f"[+] Worker instance launched successfully with name: {instance_name}")
+
+        gcp_create_attach_disk(disks_client,instances_client,project_id,zone,image_self_link,instance_name,disk_name)
+        print(f"[+] Disk: {disk_name} attached and running successfully")
+
+        ip=gcp_get_ip(instances_client,project_id,zone,instance_name)
+
+        if not gcp_wait_for_ssh(ip,key):
+            print("[-] Worker did not respond with SSH ")
+            return None
+
+        print("[!] Prepairing worker...")
+        #connect and mount image
+        ok,out,err=gcp_run_command(ip,key,[
+            "sudo mkdir -p /mnt/target",
+            "sudo mount -o ro /dev/sdb1 /mnt/target"
+        ])
+
+        if not ok:
+            print(f"[-] Failed to prepare and mount disk: {err}")
+            return None
+        else:
+            print("[+] Worker preperation successfull")
+
+        print("[+] Installing talos on worker...")
+        ok,out,err=gcp_run_command(ip,key,[
+            "sudo apt-get update -qq",
+            "sudo apt-get install -y git",
+            "git clone https://github.com/m0kall/talos.git",
+            "cd talos",
+            "chmod +x install.sh",
+            "sudo ./install.sh"],timeout=900)
+        if not ok:
+            print(f"[-] Installation of talos failed")
+            return None
+        print("[+] Talos installation on worker completed successfully")
+
+        #name normalization again ("/"" will break paths etc on google)
+        normalized_image=image_name.replace("/","_")
+
+        print("[!] Scanning image on worker. This might take a while...")
+        remote_script=(
+            "import talos\n"
+            "from google.cloud import storage\n"
+            f"sbom=talos.generate_sbom_from_mounted_path('/mnt/target','{normalized_image}',talos.BASE_DIR)\n"
+            "scan_paths=talos.scan_img(sbom) if sbom else None\n"
+            f"merged=talos.save_merged(scan_paths,'{normalized_image}',talos.BASE_DIR) if scan_paths else None\n"
+            "if merged:\n"
+            f"    storage.Client().bucket('{bucket_name}').blob('{normalized_image}-merged.json').upload_from_filename(merged)\n"
+             "    print('UPLOAD_OK')\n"
+            "else:\n"
+            "    print('SCAN_FAILED')\n"
+        )
+
+        ok,out,err=gcp_run_command(ip,key,[
+            "cd talos",
+            f"cat>online_run.py<<'PYEOF'\n{remote_script}\nPYEOF\nsudo python3 online_run.py"
+            #"sudo python3 online_run.py"
+        ],timeout=1800)#if you change any default constants like instance type etc consider changing timeout time here.with our defaults the scan should take around 15minutes
+
+        if not ok or "UPLOAD_OK" not in out:
+            print(f"[-] Remote scan and results upload failed: {out}\n{err}")
+            return None
+
+        local_dir=BASE_DIR/"merged"
+        local_dir.mkdir(exist_ok=True)
+        local_file=local_dir/f"{normalized_image}-merged.json"
+
+        #download from bucket and delete file from bucket
+        bucket=storage_client.bucket(bucket_name)
+        blob=bucket.blob(f"{normalized_image}-merged.json")
+        blob.download_to_filename(str(local_file))
+        blob.delete()
+
+        print(f"[+] Scan completed successfully! Results downloaded at: {local_file}")
+        return str(local_file)
+    
+    except Exception as e:
+        print(f"[-] Critical error while running scans on worker machine")
+        print("Note that some scans might have been completed while others not.")
+        return None
+
+    finally:
+        gcp_cleanup(instances_client,disks_client,project_id,zone,instance_name,disk_name)
+
+
+    return
+
+#local scan logic
 def scan_img(sbom_path):
     print(f"[+] Scanning SBOM: {sbom_path}")
 
@@ -835,7 +1166,7 @@ def scan_img(sbom_path):
 #master-agent image scan for aws provider
 #default region is us-east-1 and volumes/instances goe to us-east-1a
 #default profile name is talos-ssm-profile.this can be changed by using argument --profile while running talos
-def scan_image_aws(ami_id,bucket_name,profile_name="talos-ssm-profile",region="us-east-1"):
+def aws_scan_image(ami_id,bucket_name,profile_name="talos-ssm-profile",region="us-east-1"):
     
     #default to a to zone of target region
     #availability_zone=f"{region}a"
@@ -1321,15 +1652,15 @@ def exportall():
 def handle_scan(args):
 
     #same logic as below but for aws provider
-    if args.online:
+    if args.online: #scan --online
 
         if not args.bucket:
             print("[-] Please also use --bucket <bucket_name> it is needed for downloading the results ")
             sys.exit(1)
-        if args.image:
-            handle_online_scan([args.image],args.bucket,args.profile,args.region)
+        if args.image:#scan --online --image img/path
+            handle_online_scan([args.image],args.bucket,args.profile,args.region,args.gcp_project,args.zone,args.service_account)
         
-        elif args.file:
+        elif args.file: #scan --online --file path/to/file
 
             if Path(args.file).exists():
                 with open(args.file,"r") as f:
@@ -1337,7 +1668,7 @@ def handle_scan(args):
                     if not imgs:
                         print("[-] File does not contain any image identifiers")
                     else:
-                        handle_online_scan(imgs,args.bucket,args.profile,args.region)
+                        handle_online_scan(imgs,args.bucket,args.profile,args.region,args.gcp_project,args.zone,args.service_account)
             else:
                 print(f"[-] File {args.file} does not exist")
         else:
@@ -1411,29 +1742,40 @@ def handle_display(args):
     else:
         print("[-] You must provide an argument. Use 'talos display -h' for help")
 
-#used for scanning multiple aws images
-def handle_online_scan(identifiers,bucket_name,profile_name,region="us-east-1"):
+#used for scanning either aws or gcp images
+def handle_online_scan(identifiers,bucket_name,profile_name,region="us-east-1",gcp_project=None,zone="us-east1-b",service_account=None):
 
+    #loop through the whole list containing the images
     for identifier in identifiers:
         if "/" not in identifier:
             print(f"[!] Skipped {identifier}: Missing cloud prefix")
             continue
 
-        #grab provider and image id by splitting the txt file on symbol /
+        #grab provider and image id by splitting the txt file on the first "/"
         provider,image_id=identifier.split("/",1)
         
         if provider=="aws":
+            
             print(f"[+] Scanning {identifier} via AWS...")
-            result=scan_image_aws(image_id,bucket_name,profile_name,region)
+            result=aws_scan_image(image_id,bucket_name,profile_name,region)
             if not result:
                 print(f"[-] Failed scanning {identifier}")
 
+
         elif provider=="gcp":
-        
-            print("2DO GOOGLE??")
-        
+
+            if not gcp_project:
+                print(f"[!] Skipped {identifier}: please use --project")
+                continue #dont crash the whole loop if we have no gcp project run the other scans
+
+            print(f"[+] Scanning {identifier} via GCP...")
+            result=gcp_scan_image(image_id,bucket_name,gcp_project,zone,service_account)
+
+            if not result:
+                print(f"[-] Critical error while scanning {identifier}")
+
         else:
-            print(f"[!]Skipped {identifier}: unsupported provider")
+            print(f"[!] Skipped {identifier}: unsupported provider")
 
     return
 
@@ -1504,24 +1846,34 @@ def main():
         "--file",
         help="Provide path to textfile containing list of scannable images"
     )
-
-
-
-    #2DO
+    scan_parser.add_argument(
+        "--project",
+        dest="gcp_project", #overide for simplicity
+        help="GCP project ID to use for the worker insance,disk and image lookup." 
+    )
     scan_parser.add_argument(
         "--online",
         action="store_true",
-        help="Scan a VM image directly from a cloud provider (use cloud-prefixed identifiers aws/ami-xxx for aws and 2DOGOOGLEMAYBE?)"
+        help="Scan a VM image directly from a cloud provider (use cloud-prefixed identifiers aws/ami-xxx for aws and gcp/?????2DO)"
     )
     scan_parser.add_argument(
         "--bucket",
-        help="S3 bucket name used to download scan results from the cloud worker AWS "
+        help="S3 bucket name used to download scan results from the cloud worker (AWS/GCP) "
     )
-
     scan_parser.add_argument(
         "--region",
         default="us-east-1",
         help="AWS region to use for the worker instance,volume and snapshot lookup. Must match the region of target AMI. Defaults to us-east-1"
+    )
+    scan_parser.add_argument(
+        "--zone",
+        default="us-east1-b",
+        help="GCP zone to use for the worker instance and disk. Must match the region of project. defaults to us-east1-b"
+    )
+    scan_parser.add_argument(
+        "--serviceacc",
+        dest="service_account",
+        help="GCP service account email. If not given it falls back to TALOS_GCP_SERVICE_ACCOUNT enviromental variable. Please read readmefile"
     ) 
 
     #====arguments for display command
