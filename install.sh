@@ -35,8 +35,8 @@ else
 fi
 
 
-#pip packages installation: tabulate,openpyxl,boto3
-for pkg in tabulate openpyxl boto3; do
+#pip packages installation: tabulate,openpyxl,boto3 etc
+for pkg in tabulate openpyxl boto3 paramiko google-cloud-storage google-cloud-compute; do
     if pip3 show "$pkg" &> /dev/null; then
         echo "[!] Skipping Package $pkg (already installed)"
     else
