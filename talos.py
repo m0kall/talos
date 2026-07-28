@@ -893,7 +893,7 @@ def gcp_get_ip(instances_client,project_id,zone,instance_name):
         zone=zone,
         instance=instance_name
     )
-    return instance.network_interfaces[0].access_configs[0].nat_ip
+    return instance.network_interfaces[0].access_configs[0].nat_i_p
 
 
 
