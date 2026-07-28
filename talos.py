@@ -1089,7 +1089,7 @@ def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_a
         return str(local_file)
     
     except Exception as e:
-        print(f"[-] Critical error while running scans on worker machine")
+        print(f"[-] Critical error while running scans on worker machine: {e}")
         print("Note that some scans might have been completed while others not.")
         return None
 
