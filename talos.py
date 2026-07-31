@@ -12,12 +12,13 @@ from datetime import datetime
 import boto3
 import time
 import paramiko
+import re
 from google.cloud import compute_v1
 from google.cloud import storage 
 
 
 #Based on numerous test, with these constants it is guranteed that there will be enough ram & disk space for talos to work on an AWS instance within a reasonable time
-#scan per image should take around 10minutes (depending on target ami & its vulnerabilities)
+#scan per image should take around 5minutes (depending on target ami & its vulnerabilities) while installation around 10
 #You can always use your prefered values at your own risk.
 INSTANCE_TYPE="t3.small"
 ROOT_DISK= 20
@@ -988,6 +989,10 @@ def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_a
     images_client=compute_v1.ImagesClient()
     storage_client=storage.Client()
 
+    #track if created
+    created_instance=None
+    created_disk=None
+
     #normalize names and limit to 63 characters cuz of google restrictions
     instance_name=f"talos-worker-{image_name}".replace("_","-").replace(".","-")[:63]
     disk_name=f"talos-disk-{image_name}".replace("_","-").replace(".","-")[:63]
@@ -1009,13 +1014,13 @@ def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_a
         #ssh connection estabilishment
         key,public_key_str=gcp_generate_keypair()
 
-        gcp_launch_worker(instances_client,project_id,zone,instance_name,service_acc_mail,public_key_str)
-        print(f"[+] Worker instance launched successfully with name: {instance_name}")
+        created_instance=gcp_launch_worker(instances_client,project_id,zone,instance_name,service_acc_mail,public_key_str)
+        print(f"[+] Worker instance launched successfully with name: {created_instance}")
 
-        gcp_create_attach_disk(disks_client,instances_client,project_id,zone,image_self_link,instance_name,disk_name)
-        print(f"[+] Disk: {disk_name} attached and running successfully")
+        created_disk=gcp_create_attach_disk(disks_client,instances_client,project_id,zone,image_self_link,created_instance,disk_name)
+        print(f"[+] Disk: {created_disk} attached and running successfully")
 
-        ip=gcp_get_ip(instances_client,project_id,zone,instance_name)
+        ip=gcp_get_ip(instances_client,project_id,zone,created_instance)
 
         if not gcp_wait_for_ssh(ip,key):
             print("[-] Worker did not respond with SSH ")
@@ -1093,7 +1098,7 @@ def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_a
         return None
 
     finally:
-        gcp_cleanup(instances_client,disks_client,project_id,zone,instance_name,disk_name)
+        gcp_cleanup(instances_client,disks_client,project_id,zone,created_instance,created_disk)
 
 
     return
@@ -1174,6 +1179,7 @@ def aws_scan_image(ami_id,bucket_name,profile_name="talos-ssm-profile",region="u
     ec2=session.client("ec2")
     ssm=session.client("ssm")
     s3=session.client("s3")
+    #track if created
     instance_id=None
     volume_id=None
 
@@ -1653,11 +1659,12 @@ def handle_scan(args):
     #same logic as below but for aws provider
     if args.online: #scan --online
 
-        if not args.bucket:
-            print("[-] Please also use --bucket <bucket_name> it is needed for downloading the results ")
-            sys.exit(1)
+        #if not args.bucket:
+        #    print("[-] Please also use --bucket <bucket_name> it is needed for downloading the results ")
+        #    sys.exit(1)
+
         if args.image:#scan --online --image img/path
-            handle_online_scan([args.image],args.bucket,args.profile,args.region,args.gcp_project,args.zone,args.service_account)
+            handle_online_scan([args.image],args.bucket,args.gcp_bucket,args.profile,args.region,args.gcp_project,args.zone,args.service_account)
         
         elif args.file: #scan --online --file path/to/file
 
@@ -1667,7 +1674,7 @@ def handle_scan(args):
                     if not imgs:
                         print("[-] File does not contain any image identifiers")
                     else:
-                        handle_online_scan(imgs,args.bucket,args.profile,args.region,args.gcp_project,args.zone,args.service_account)
+                        handle_online_scan(imgs,args.bucket,args.gcp_bucket,args.profile,args.region,args.gcp_project,args.zone,args.service_account)
             else:
                 print(f"[-] File {args.file} does not exist")
         else:
@@ -1741,8 +1748,40 @@ def handle_display(args):
     else:
         print("[-] You must provide an argument. Use 'talos display -h' for help")
 
+#used for searching an image on a whole gcp path
+def parse_gcp_identifier(image_id,fallback_project=None):
+
+    #matches the whole string that contains the exact path of the scannable image
+    match = re.match(r"^projects/([^/]+)/global/images/([^/]+)$", image_id)
+
+    #if user gave us the full path return the info else return the value at --project
+    if match:
+        return match.group(1),match.group(2) #return path,image name
+
+    if fallback_project:
+        return fallback_project,image_id
+
+    return None,None
+
+#search an image on aws fullpath
+def parse_aws_identifier(image_id,fallback_region=None):
+
+    match = re.match(r"^arn:aws:ec2:([^:]+):(\d+):image/(ami-[0-9a-f]+)$", image_id)
+
+    if match:
+        return match.group(1),match.group(3) #return region,ami_id
+
+    if image_id.startswith("ami-"):
+        return fallback_region,image_id
+
+    return None,None
+
+
+
+
+
 #used for scanning either aws or gcp images
-def handle_online_scan(identifiers,bucket_name,profile_name,region="us-east-1",gcp_project=None,zone="us-east1-b",service_account=None):
+def handle_online_scan(identifiers,aws_bucket_name,gcp_bucket_name,profile_name,region="us-east-1",gcp_project=None,zone="us-east1-b",service_account=None):
 
     #loop through the whole list containing the images
     for identifier in identifiers:
@@ -1754,21 +1793,41 @@ def handle_online_scan(identifiers,bucket_name,profile_name,region="us-east-1",g
         provider,image_id=identifier.split("/",1)
         
         if provider=="aws":
+
+            if not aws_bucket_name:
+                print(f"[!] Skipped {identifier}: s3 bucket name required. Please use --awsbucket")
+                continue
+
+
+            #get arn "path" to ami id fallsback to users --region if not found
+            resolved_region,ami_id=parse_aws_identifier(image_id,fallback_region=region)
+
+            if not ami_id:
+                print(f"[!] Skipped {identifier}: could not find ami id")
+                continue
             
             print(f"[+] Scanning {identifier} via AWS...")
-            result=aws_scan_image(image_id,bucket_name,profile_name,region)
+            result=aws_scan_image(ami_id,aws_bucket_name,profile_name,resolved_region)
+
             if not result:
                 print(f"[-] Failed scanning {identifier}")
 
 
         elif provider=="gcp":
 
-            if not gcp_project:
-                print(f"[!] Skipped {identifier}: please use --project")
-                continue #dont crash the whole loop if we have no gcp project run the other scans
+            if not gcp_bucket_name:
+                print(f"[!] Skipped {identifier}: GCS bucket name required. Please use --gcpbucket")
+                continue
+
+            resolved_project,image_name=parse_gcp_identifier(image_id,fallback_project=gcp_project)
+
+            if not resolved_project:
+                print(f"[!] Skipped {identifier}: Invalid project.")
+                continue
+
 
             print(f"[+] Scanning {identifier} via GCP...")
-            result=gcp_scan_image(image_id,bucket_name,gcp_project,zone,service_account)
+            result=gcp_scan_image(image_name,gcp_bucket_name,resolved_project,zone,service_account)
 
             if not result:
                 print(f"[-] Critical error while scanning {identifier}")
@@ -1841,6 +1900,7 @@ def main():
     #    "--sbom",
     #    help="Provide path to SBOM file to scan vulnerabilities"
     #)
+    
     scan_parser.add_argument(
         "--file",
         help="Provide path to textfile containing list of scannable images"
@@ -1848,17 +1908,25 @@ def main():
     scan_parser.add_argument(
         "--project",
         dest="gcp_project", #overide for simplicity
-        help="GCP project ID to use for the worker insance,disk and image lookup." 
+        help="GCP project ID to use for the worker insance,disk and image lookup. Only needed if you are not using projects/projectid/... path"
     )
     scan_parser.add_argument(
         "--online",
         action="store_true",
-        help="Scan a VM image directly from a cloud provider (use cloud-prefixed identifiers aws/ami-xxx for aws and gcp/?????2DO)"
+        help="Scan a VM image directly from a cloud provider (aws/gcp.use cloud-prefixed identifiers please read readme file)"
     )
     scan_parser.add_argument(
-        "--bucket",
-        help="S3 bucket name used to download scan results from the cloud worker (AWS/GCP) "
+        "--awsbucket",
+        dest="bucket",
+        help="S3 bucket name used to download scan results from the cloud worker AWS) "
     )
+
+    scan_parser.add_argument(
+        "--gcpbucket",
+        dest="gcp_bucket",
+        help="GCP GCS bucket name used to download scan results from the cloud worker GCP) "
+    )
+
     scan_parser.add_argument(
         "--region",
         default="us-east-1",
