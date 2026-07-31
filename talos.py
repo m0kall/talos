@@ -981,7 +981,7 @@ def gcp_cleanup(instances_client,disks_client,project_id,zone,instance_name,disk
 
 
 
-def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_account=None):
+def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_account=None,image_project=None):
 
     #create clients to manage vm/instance,disks,images and buckets
     instances_client=compute_v1.InstancesClient()
@@ -1004,9 +1004,12 @@ def gcp_scan_image(image_name,bucket_name,project_id,zone="us-east1-b",service_a
         print("[-] Account email is not set.Please read readme file for setting up")
         return None
 
+    #image project=whole path to image, image id=users personal project image
+    image_project=image_project or project_id
+
     try:
         #target image to scan
-        image_self_link=gcp_get_source_image(images_client,project_id,image_name)
+        image_self_link=gcp_get_source_image(images_client,image_project,image_name)
         if not image_self_link:
             print("[-] Failed while retrieving image")
             return None
@@ -1815,10 +1818,16 @@ def handle_online_scan(identifiers,aws_bucket_name,gcp_bucket_name,profile_name,
 
         elif provider=="gcp":
 
+            if not gcp_project:
+                print(f"[!] Skipped {identifier}: CGP project required. Please use --project")
+                continue
+
+
             if not gcp_bucket_name:
                 print(f"[!] Skipped {identifier}: GCS bucket name required. Please use --gcpbucket")
                 continue
 
+            #resolved project=where the image project is
             resolved_project,image_name=parse_gcp_identifier(image_id,fallback_project=gcp_project)
 
             if not resolved_project:
@@ -1827,7 +1836,7 @@ def handle_online_scan(identifiers,aws_bucket_name,gcp_bucket_name,profile_name,
 
 
             print(f"[+] Scanning {identifier} via GCP...")
-            result=gcp_scan_image(image_name,gcp_bucket_name,resolved_project,zone,service_account)
+            result=gcp_scan_image(image_name,gcp_bucket_name,gcp_project,zone,service_account,image_project=resolved_project)
 
             if not result:
                 print(f"[-] Critical error while scanning {identifier}")
