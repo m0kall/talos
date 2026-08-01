@@ -8,6 +8,7 @@ This project includes a modified version of https://github.com/popey/sbom-vm
 The code inside "tools/sbom-vm" directory is based on the original repository and has been modified to satisfy the requirements of Talos.
 
 ======== Basic Information ====================
+
 Talos is a virtual image scanner that uses trivy,grype and osv-scanner to search and find vulnerabilities from a provided image.
 Using a slightly modified version of sbom-vm (https://github.com/popey/sbom-vm) talos creates a Software Bill of Materials (SBOM) from an inputed image.
 The sbom is saved at the "sboms" folder.After that it uses Trivy,Grype and lastly osv-scanner on the produced sbom to find vulnerabilities.
@@ -63,6 +64,7 @@ The overall logic of the online feature goes as follows:
 You can use talos --help for information on each command and how to use them. Also on the chapters bellow are a few examples and explanations
 
 ========== Installation ==========
+
 You can install talos to your cli by using this commands:
 
 git clone https://github.com/m0kall/talos.git
@@ -76,6 +78,7 @@ the install.sh contains every library for this project to work on your system in
 you can just run this using python3 but it is suggested to install it in case you run into some libraries missing like google cloud compute etc
 
 ===== Local Scanning ========
+
 Talos can either scan 1 local image or you can provide it with a txt file containing the paths multiple .img files.
 Firstly, talos will create an SBOM from the .img file and save it to the "sboms" folder.
 After that the scanning will begin using Trivy,Grype and lastly OSV-scanner. Each seperate scanner will save its results to its specified subfolder located in "scans" folder
@@ -104,6 +107,7 @@ talos display --image merged/image-merged.json --severity all --limit 100
 talos display --all
 
 =========== Talos All Available Commands =============
+
 Here are all the commands you can use and a quick explenation of them:
 
 *scan a single local .img file
@@ -138,8 +142,10 @@ talos scan --online --file <path> --awsbucket <name> --gcpbucket <name> --projec
 *show help message
 talos -h / talos <command> -h
 
-================ Provider Setup Instructions ===========================
-=========== AWS First time setup instructions ==========
+=================== Provider Setup Instructions =============================
+
+============= AWS First time setup instructions ============
+
 In order for talos to connect to your AWS account and scan specified ami images, you need to properly setup the following:
 1) create an IAM User with policies AmazonEC2FullAccess, AmazonS3FullAccess, AmazonSSMFullAccess, IAMFullAccess. You can use the website to attach these policies
 2) Create access keys
@@ -203,6 +209,7 @@ you can always use talos --help for more information
 
 
 ============== GCP First Time Setup Instructions =============
+
 In order for talos to connect to your AWS account and scan specified gcp images, you need to properly setup the following:
 
 1) Run the install.sh script to your local machine OR just download google cloud compute and paramiko using:
@@ -281,7 +288,9 @@ some example commands include:
 
 ==========================================================================
 
+
 ======= Miscellaneous ============
+
 This project was developed as a part of a bachelor's thesis at the University of the Aegean
 You are welcome to use this project, build upon it and experiment with it as you see fit.
 May this project proves useful to others and help you learn, as it helped me.
