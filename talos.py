@@ -1316,6 +1316,31 @@ def get_sort_value(r):
     else:
         return float("inf")
 
+
+
+#get a list containing all risk factors from an img and sort it
+def get_risk_rankings(cves):
+
+    risks=[]
+
+    for cves_data in cves.values():
+        risk= cves_data.get("risk_factor")
+
+        if risk is not None:
+            risks.append(risk)
+
+    #if for any reason all risks are null
+    if not risks:
+        return (float("inf"),)
+
+    #sort high to low
+    risks.sort(reverse=True)
+
+    #tuple helps us to compare each element (risk factor) 1 by 1 and skip using if statements for second etc.
+    #basically using tuples will compare 1 risk factor to the next entry (if they are equal) and keep going until they are not
+    return tuple(risks)
+
+
 #shows almost all info on cves from 1 image
 #the default values of display can be changed by the user for better visibility. talos by default displays 50 entries with high and critical severity
 def display_image(path, limit=50,severity_filter="high"):
@@ -1420,6 +1445,11 @@ def display_image(path, limit=50,severity_filter="high"):
 
     return
 
+#from the whole row return only the risk factor (tuple)
+def get_ranking_key(row):
+    return row[-1]
+
+
 #shows the comparison between all images
 def display_all():
 
@@ -1472,9 +1502,15 @@ def display_all():
         else:
             max_epss_prc_str="N/A"
 
-        rows.append([image_name,total_cves,cvss_str,max_epss_prc_str,risk_str,top_risk_cve])
+        #compare all risks in img
+        ranking= get_risk_rankings(data.get("found_vulnerabilities",{}))
+        rows.append([image_name,total_cves,cvss_str,max_epss_prc_str,risk_str,top_risk_cve,ranking])
 
-    rows.sort(key=get_sort_value)
+    rows.sort(key=get_ranking_key)
+
+    #strip ranking (dont display it just used in sorting)
+    for row in rows:
+        row.pop()
 
     #add ranking number to each image in each row
     for index,row in enumerate(rows):
@@ -1565,12 +1601,15 @@ def exportall():
             max_epss_prc_str=f"{max_epss_prc*100:.2f}%"
         else:
             max_epss_prc_str="N/A"
+        ranking=get_risk_rankings(data.get("found_vulnerabilities",{}))
+        image_rows.append([image_name,total_cves,cvss_str,max_epss_prc_str,risk_str,top_risk_cve,ranking])
 
-        image_rows.append([image_name,total_cves,cvss_str,max_epss_prc_str,risk_str,top_risk_cve])
-    image_rows.sort(key=get_sort_value)
+    #this sorts by risk factor
+    image_rows.sort(key=get_ranking_key)
 
     for index, row in enumerate(image_rows):
-        sheet1.append([index+1]+row)#unlike display function here we do a new list and we join it with the other rows. then we append the whole row to sheet1
+        #strip rankings from the colum (the [:-1])
+        sheet1.append([index+1]+row[:-1])#unlike display function here we do a new list and we join it with the other rows. then we append the whole row to sheet1
 
     ###2nds sheet containing every info in found cves and in what image they were found
     sheet2=new_workbook.create_sheet(title="All CVEs Info")
@@ -1702,7 +1741,7 @@ def handle_scan(args):
             sys.exit(1)     
 
 
-    #elif args.sbom: #scan --sbom sbompath 2do only for sbom?
+    
 
     elif args.file: #scan --file path/to/file
 
@@ -1819,7 +1858,7 @@ def handle_online_scan(identifiers,aws_bucket_name,gcp_bucket_name,profile_name,
         elif provider=="gcp":
 
             if not gcp_project:
-                print(f"[!] Skipped {identifier}: CGP project required. Please use --project")
+                print(f"[!] Skipped {identifier}: GCP project required. Please use --project")
                 continue
 
 
@@ -1904,11 +1943,6 @@ def main():
         help="IAM instance profile name. This contains SSM and S3 permissions for the worker instance. Default name is talos-ssm-profile "
     )
 
-    #2do?
-    #scan_parser.add_argument(
-    #    "--sbom",
-    #    help="Provide path to SBOM file to scan vulnerabilities"
-    #)
     
     scan_parser.add_argument(
         "--file",
