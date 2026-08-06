@@ -20,7 +20,7 @@ Risk factor is calculated using the following function (and NOT CVSS v2 values):
 
 The epss scores are calculated using the official API of FIRST.org : https://www.first.org/epss/api
 
-Since a single image contains multiple CVES, when ranking the images based on their risk factor, only the max value is used in order to determine which is safer than the other. This is based on a weakest link approach meaning that one critical flaw of an image makes the whole image dangerous regardless of other less critical vulnerabilities.
+Since a single image contains multiple CVES, when ranking the images based on their risk factor, the max value is used in order to determine which is safer than the other. In the case of 2 risk factors of 2 images are the same, a comparison is made on the next risk factor in order to determine which image is safer. This will continue until risk factors are different and the comparison can be made.
 
 Results can be displayed on the cli filtered according to severity
 
