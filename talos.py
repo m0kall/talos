@@ -1710,7 +1710,7 @@ def handle_scan(args):
         
         elif args.file: #scan --online --file path/to/file
 
-            if Path(args.file).exists():
+            if Path(args.file).is_file():
                 with open(args.file,"r") as f:
                     imgs=[line.strip() for line in f if line.strip()]
                     if not imgs:
@@ -1724,6 +1724,10 @@ def handle_scan(args):
         return
 
     if args.image: #scan --image img/path
+
+        if not Path(args.image).is_file():
+            print(f"[-] Image {args.image} doest not exist")
+            sys.exit(1)
 
         sbomPath= generate_sbom(args.image)
         if not sbomPath:
@@ -1745,7 +1749,7 @@ def handle_scan(args):
 
     elif args.file: #scan --file path/to/file
 
-        if Path(args.file).exists():
+        if Path(args.file).is_file(): #.exists():
             with open(args.file, "r") as f:
                 imgs= [line.strip() for line in f if line.strip()] #read lines ignore spaces
                 if not imgs:
@@ -1753,8 +1757,8 @@ def handle_scan(args):
                 
                 else:
                     for image in imgs:
-                        #check if path exists
-                        if not Path(image).exists():
+                        #check if image is a valid file
+                        if not Path(image).is_file():
                             print(f"[!] Skipped image {image} (not found)")
                             continue
 
