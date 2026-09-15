@@ -116,7 +116,7 @@ def trivy_parse(path):
     results= {}
     skipped= 0
     
-    #parsing trivy results according to trivy's structure. #DELETEME explain in pdf the structure of trivys data
+    #parsing trivy results according to trivy's structure.
     #if no results where found we get an empty list []
     for target in data.get("Results",[]):
         for vulnerabilities in (target.get("Vulnerabilities") or []):
@@ -130,7 +130,7 @@ def trivy_parse(path):
 
             cvss_raw= vulnerabilities.get("CVSS") or {} #if cvss missing returns empty dictionary {}
 
-            #DELETE ME AND WRITE IN PDF using a dict of dicts for faster search. merger can find cvid instantly and not go through the whole data
+            
             
             #our standrard structure:
             results[vulnid]= {
