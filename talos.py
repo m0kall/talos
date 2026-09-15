@@ -170,7 +170,7 @@ def grype_parse(path):
     #parsing grype results according to grype structure same logic as trivy
     for matches in data.get("matches", []):
 
-        #DELETEME explain this to the pdf (grype structure)
+        
         vuln= matches.get("vulnerability", {})
         arti= matches.get("artifact", {})
         vulnid= vuln.get("id","")
