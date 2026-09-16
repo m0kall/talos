@@ -1121,7 +1121,7 @@ def scan_img(sbom_path):
 
     #normalize name
     imageName = Path(sbom_path).stem.replace(".cdx", "")
-    #imageName = Path(sbom_path).stem.replace(".cdx"," ")
+    
 
     #output files path
     trivy_out = scan_dir / "trivy" / f"{imageName}-trivy.json"
@@ -1155,9 +1155,9 @@ def scan_img(sbom_path):
             osvresult= subprocess.run(
                 
                 ["osv-scanner", "--format", "json", "-L", sbom_path],
-                check=False, #osv returns 1 even when worked correctly :/
+                check=False, #osv returns 1 even when worked correctly 
                 stdout=f,
-                stderr=subprocess.DEVNULL #cleanup osv file from warnings at the top of the file to not bombard user with garbage
+                stderr=subprocess.DEVNULL #cleanup osv file from warnings at the top of the file to suppress unecessary messages to the user
     )
         #osv returns 1 if found vulnerabilities,2 for errors,0 for no vulnerabilities    
         if osvresult.returncode >1:
