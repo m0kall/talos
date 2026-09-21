@@ -687,7 +687,7 @@ def aws_launch_worker(ec2_client,instance_profile,availability_zone):
     #this returns the instance id. basically it works like: get list of instances,get the 1st instance on it,get id
     return response["Instances"][0]["InstanceId"]
 
-#wait untile worker is ready to recieve commands through ssm
+#wait until worker is ready to recieve commands through ssm
 def aws_wait_for_ssm(ssm_client,instance_id,timeout=120):
     print("[!] Waiting for worker instance to register with SSM")
     wait=0
